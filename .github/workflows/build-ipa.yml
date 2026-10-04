@@ -1,0 +1,155 @@
+name: Build Pure Paradise IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Ren'Py 8.5.3 + iOS support
+        uses: remarkablegames/setup-renpy@v2
+        with:
+          cli-version: 8.5.3
+          renios: true
+
+      - name: Prepare helper tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install gdown rpycdec==0.2.0
+
+      - name: Download APK split archive from Google Drive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p parts
+
+          .venv/bin/gdown "https://drive.google.com/uc?id=1aaTylWfYrCAB5bO3GHxrB42MN3eCP7Zw" -O parts/game.zip.001
+          .venv/bin/gdown "https://drive.google.com/uc?id=1lLDzZMrZ25GUCmSbw_qrNLdjt2iFaANy" -O parts/game.zip.002
+          .venv/bin/gdown "https://drive.google.com/uc?id=1uI0nxSeZyt6bsglRmbJeoBTCKYnz_y62" -O parts/game.zip.003
+          .venv/bin/gdown "https://drive.google.com/uc?id=1BvcxonIf-wQ27xlSe6C7rkazSuHnVYOu" -O parts/game.zip.004
+          .venv/bin/gdown "https://drive.google.com/uc?id=1Zz5LPFxAlLzCW4nV1I_lacnxYKLfXZhF" -O parts/game.zip.005
+          .venv/bin/gdown "https://drive.google.com/uc?id=1WqmZMjx1vIaq-DurbzmD1z_HqRDpN9dK" -O parts/game.zip.006
+          .venv/bin/gdown "https://drive.google.com/uc?id=1BWmwVlKXR3gMuts3W5A3zejRH1yofLes" -O parts/game.zip.007
+          .venv/bin/gdown "https://drive.google.com/uc?id=10DvhSuBzOF0kyBznVQ2R5B1VZT3URvX1" -O parts/game.zip.008
+          .venv/bin/gdown "https://drive.google.com/uc?id=1oiz5zUFPYRoXm2a5uzySslP1Bl78844j" -O parts/game.zip.009
+          .venv/bin/gdown "https://drive.google.com/uc?id=1TFhA3OQCN-nPdSnzFYaftLBXpunZeESK" -O parts/game.zip.010
+          .venv/bin/gdown "https://drive.google.com/uc?id=1zIMOuldKVD4WNcGFg7FCev5vbNmwiUM0" -O parts/game.zip.011
+          .venv/bin/gdown "https://drive.google.com/uc?id=193v2DAEC758GLDXrHKxp8DGoHcK2Z9wD" -O parts/game.zip.012
+
+          cat \
+            parts/game.zip.001 parts/game.zip.002 parts/game.zip.003 \
+            parts/game.zip.004 parts/game.zip.005 parts/game.zip.006 \
+            parts/game.zip.007 parts/game.zip.008 parts/game.zip.009 \
+            parts/game.zip.010 parts/game.zip.011 parts/game.zip.012 \
+            > Pure_Paradise0.15.zip
+
+          unzip -t Pure_Paradise0.15.zip
+          mkdir -p outer
+          unzip -q Pure_Paradise0.15.zip -d outer
+          APK="$(find outer -type f -name '*.apk' -print -quit)"
+          test -n "$APK"
+          echo "APK=$APK" >> "$GITHUB_ENV"
+
+      - name: Extract Ren'Py project from APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/bin/rpycdec extract-game "$APK" -o extracted
+
+          # Keep only the actual Ren'Py project. Android runtime files from the APK
+          # are not needed for the iOS build.
+          mkdir -p project
+          cp -R extracted/game project/game
+
+          echo "Project size:"
+          du -sh project
+
+      - name: Sanity-check the game with Ren'Py 8.5.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          renpy-cli project lint > lint.txt 2>&1 || {
+            cat lint.txt
+            exit 1
+          }
+          tail -80 lint.txt
+
+      - name: Create Ren'Py Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf ios-project
+          renpy-launcher ios_create "$GITHUB_WORKSPACE/project" "$GITHUB_WORKSPACE/ios-project"
+          find ios-project -maxdepth 2 -type f | head -80
+
+      - name: Build unsigned iPhone app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          XCODEPROJ="$(find ios-project -maxdepth 1 -name '*.xcodeproj' -print -quit)"
+          test -n "$XCODEPROJ"
+
+          xcodebuild -project "$XCODEPROJ" -list
+
+          TARGET="$(xcodebuild -project "$XCODEPROJ" -list -json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["project"]["targets"][0])')"
+          echo "Building target: $TARGET"
+
+          rm -rf "$GITHUB_WORKSPACE/xcode-out"
+          mkdir -p "$GITHUB_WORKSPACE/xcode-out"
+
+          xcodebuild \
+            -project "$XCODEPROJ" \
+            -target "$TARGET" \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            SYMROOT="$GITHUB_WORKSPACE/xcode-out" \
+            build
+
+          APP="$(find "$GITHUB_WORKSPACE/xcode-out" -type d -name '*.app' -path '*Release-iphoneos*' -print -quit)"
+          test -n "$APP"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          du -sh "$APP"
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf Payload Pure_Paradise_0.15_unsigned.ipa
+          mkdir Payload
+          ditto "$APP" "Payload/$(basename "$APP")"
+          /usr/bin/zip -qry Pure_Paradise_0.15_unsigned.ipa Payload
+          ls -lh Pure_Paradise_0.15_unsigned.ipa
+          shasum -a 256 Pure_Paradise_0.15_unsigned.ipa | tee Pure_Paradise_0.15_unsigned.sha256
+
+      - name: Publish IPA in GitHub Releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="ipa-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          gh release create "$TAG" \
+            Pure_Paradise_0.15_unsigned.ipa \
+            Pure_Paradise_0.15_unsigned.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --draft \
+            --title "Pure Paradise 0.15 â unsigned IPA" \
+            --notes "Unsigned iOS build generated from the original APK resources with Ren'Py 8.5.3. Sign the IPA before installing on an iPhone."
